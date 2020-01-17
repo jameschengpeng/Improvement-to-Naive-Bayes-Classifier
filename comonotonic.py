@@ -6,7 +6,7 @@ import operator
 
 # handle the case of pure comonotonicity
 class pure_comonotonic():
-    def __init__(self, x_train, y_train, unrankable = None):
+    def __init__(self, x_train, y_train, unrankable):
         """
         Features types: discrete rankable; binary; discrete unrankable
         unrankable should be a list specifying the columns for discrete unrankable features
@@ -18,7 +18,13 @@ class pure_comonotonic():
             self.como = list(set([i for i in range(len(x_train[0]))]) - set(unrankable))
         else:
             self.como = [i for i in range(len(x_train[0]))]
-    
+
+    def extract_feature_val(self):
+        feature_val = {}
+        for i, cols in enumerate(self.x_train.T):
+            feature_val[i] = max(np.unique(cols))+1
+        self.feature_val = feature_val # how many categories for each feature
+
     def get_prior_prob(self):
         # get the prior probability and indices of instances for different classes
         prior_prob = {} # key is class, value is the prior probability of this class
@@ -34,7 +40,7 @@ class pure_comonotonic():
     
     # compute the posterior probability for features of type unrankable and rankable
     # rankable is a boolean variable
-    def get_posterior_prob(self, rankable):
+    def get_posterior_prob(self, rankable = True):
         post_prob = {} # { feature_idx: { class: {feature_value: posterior_prob} } }
         if rankable == False:
             feature_list = self.unrankable
@@ -49,8 +55,13 @@ class pure_comonotonic():
                         class_dict[self.x_train[idx][f]] = 1
                     else:
                         class_dict[self.x_train[idx][f]] += 1
-                # maybe you need to add some small numbers to prevent zero conditional probability
-                class_dict = {k:v/len(self.class_idx[c]) for k,v in class_dict.items()}
+                # use Laplacian correction to avoid zero probability problem
+                all_fv = [i for i in range(self.feature_val[f])]
+                for fv in all_fv:
+                    if fv not in class_dict.keys():
+                        class_dict[fv] = 1
+                summation = sum(class_dict.values())
+                class_dict = {k:v/summation for k,v in class_dict.items()}
                 feature_dict[c] = class_dict
             post_prob[f] = feature_dict
         return post_prob
@@ -77,30 +88,39 @@ class pure_comonotonic():
         # call this function to compute the conditional probability of comonotonic features
         # { feature_idx: { class: {feature_value: posterior_prob} } }
         self.rankable_post_prob = self.get_posterior_prob(rankable = True)
-        
         como_var = np.array([[self.x_train[row][col] for col in self.como] for row in range(len(self.x_train))])
         corr_matrix = np.corrcoef(como_var.T)
         corr_sum = [sum([abs(j) for j in corr_matrix[i]]) for i in range(len(corr_matrix))]
         base_feature_idx_como = corr_sum.index(max(corr_sum)) # the index of the base feature in rankable features
         base_feature = self.como[base_feature_idx_como] # the index of the base feature in all features
-        
+        #print("Base feature is " + "X" + str(base_feature))
         prob_interval_collection = {} # {feature_idx: { class: {feature_value: [inf, sup]} } }
         for f in self.rankable_post_prob.keys():
+            feature_dict = {} # { class: {feature_value: [inf, sup]} }
             for c in self.rankable_post_prob[f].keys():
+                class_dict = {} # {feature_value: [inf, sup]}
                 for fv in self.rankable_post_prob[f][c].keys():
                     interval = self.get_prob_interval(self.rankable_post_prob[f][c], fv)
                     if f != base_feature:
                         feature_como_pos = self.como.index(f)
                         if corr_matrix[base_feature_idx_como][feature_como_pos] < 0:
                             interval = [1-interval[1], 1-interval[0]]
-                    prob_interval_collection[f][c][fv] = interval
+                    class_dict[fv] = interval
+                feature_dict[c] = class_dict
+            prob_interval_collection[f] = feature_dict
+            #print(f)
         self.como_prob_interval = prob_interval_collection
 
     def run(self):
         # this function generalizes the member functions above
         self.get_prior_prob()
-        self.get_unrankable_prob()
+        #print("Complete prior probability")
+        self.extract_feature_val()
+        if self.unrankable != None:
+            self.get_unrankable_prob()
+            #print("Complete unrankable probability")
         self.get_comonotonic_prob_interval()
+        #print("Complete comonotonic probability")
       
     def interval_intersection(self, intervals): # intervals is a list of list
         infimum = max([interval[0] for interval in intervals])
@@ -132,3 +152,11 @@ class pure_comonotonic():
         for x in x_test:
             y_predict.append(self.predict_single(x))
         return y_predict
+
+
+def accuracy(y_predict, y_test):
+    t = 0
+    for i in range(len(y_test)):
+        if y_predict[i] == y_test[i]:
+            t += 1        
+    return t/len(y_test)
