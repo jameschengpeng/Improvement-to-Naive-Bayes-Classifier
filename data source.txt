@@ -1,0 +1,11 @@
+Types of datasets:
+1. all features are real-valued
+2. some are integers (i.e. categorical & rankable), some are real-valued, a few are binary
+
+Type 1:
+https://www.kaggle.com/pavanraj159/predicting-a-pulsar-star
+https://www.kaggle.com/uciml/glass
+
+Type 2:
+https://www.kaggle.com/ronitf/heart-disease-uci
+https://www.kaggle.com/uciml/adult-census-income
