@@ -3,3 +3,6 @@ For naive bayes, just use sklearn
 comonotonic.py: the module for comonotonicity classifier. It includes pure comonotonic, clustering then comonotonic
 
 Must preprocess data before passing into the functions in the module. The data should be in numpy ndarray format. As for the features, they should be transformed into discrete & rankable format, for binary features, try different encoding methods, for discrete & nonrankable features, treat as conditionally independent
+
+
+discretize train and test independently! record the intervals for every bin in the training set

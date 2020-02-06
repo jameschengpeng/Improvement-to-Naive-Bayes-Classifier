@@ -5,10 +5,11 @@ import copy
 import operator
 import utils
 from sklearn.model_selection import train_test_split
+from scipy.stats import norm
 
 # handle the case of pure comonotonicity
 class pure_comonotonic:
-    def __init__(self, x_train, y_train, unrankable):
+    def __init__(self, x_train, y_train, unrankable, feature_val):
         """
         Features types: discrete rankable; discrete unrankable; continuous
         unrankable should be a list specifying the columns for discrete unrankable features
@@ -21,12 +22,7 @@ class pure_comonotonic:
             self.como = list(set([i for i in range(len(x_train[0]))]) - set(unrankable))
         else:
             self.como = [i for i in range(len(x_train[0]))]
-
-    def extract_feature_val(self):
-        feature_val = {}
-        for i, cols in enumerate(self.x_train.T):
-            feature_val[i] = max(np.unique(cols))+1
-        self.feature_val = feature_val # how many categories for each feature
+        self.feature_val = feature_val
 
     def get_prior_prob(self):
         # get the prior probability and indices of instances for different classes
@@ -61,7 +57,7 @@ class pure_comonotonic:
                 # use Laplacian correction to avoid zero probability problem
                 all_fv = [i for i in range(self.feature_val[f])]
                 for fv in all_fv:
-                    if fv not in class_dict.keys():
+                    if fv not in list(class_dict.keys()):
                         class_dict[fv] = 1
                 summation = sum(class_dict.values())
                 class_dict = {k:v/summation for k,v in class_dict.items()}
@@ -118,7 +114,6 @@ class pure_comonotonic:
         # this function generalizes the member functions above
         self.get_prior_prob()
         #print("Complete prior probability")
-        self.extract_feature_val()
         if self.unrankable != None:
             self.get_unrankable_prob()
             #print("Complete unrankable probability")
@@ -131,7 +126,9 @@ class pure_comonotonic:
         if infimum < supremum:
             return (supremum-infimum)
         else:
-            return 0
+            # since pure como results in too many zero probability case
+            # we record how far is between the largest infimum and smallest supremum
+            return (supremum-infimum)
         
     def predict_single(self, x):
         # deal with a single case
@@ -154,10 +151,20 @@ class pure_comonotonic:
                 intervals.append(self.como_prob_interval[f][c][fv])
             prob_distribution[c] *= self.interval_intersection(intervals)
         prob_distribution_list = list(prob_distribution.values())
-        prob_distribution_list = [i*(10**8) for i in prob_distribution_list]
+        checker = [(i > 0) for i in prob_distribution_list]
+        if any(checker): # exists non-empty intersection
+            for k in prob_distribution.keys():
+                if prob_distribution[k] < 0:
+                    prob_distribution[k] = 0 
+            prob_distribution_list = list(map(lambda x: max(x,0), prob_distribution_list))
+        else: # the case in which empty intersection for each class
+            minimum = min(prob_distribution_list)
+            for k in prob_distribution.keys():
+                prob_distribution[k] = prob_distribution[k] - minimum
+            prob_distribution_list = list(map(lambda x: (x - 2*minimum), prob_distribution_list))
         for k in prob_distribution.keys():
-            prob_distribution[k] = prob_distribution[k]*(10**8)/sum(prob_distribution_list) 
-        return prob_distribution        
+            prob_distribution[k] = prob_distribution[k]/sum(prob_distribution_list)
+        return prob_distribution
             
     def predict(self, x_test):
         y_predict = []
@@ -166,8 +173,8 @@ class pure_comonotonic:
         return y_predict
 
 class clustered_comonotonic(pure_comonotonic):
-    def __init__(self, x_train, y_train, unrankable, uncategorized_df, colnames, min_corr, random_state):
-        super(clustered_comonotonic, self).__init__(x_train, y_train, unrankable)
+    def __init__(self, x_train, y_train, unrankable, feature_val, uncategorized_df, colnames, min_corr, random_state):
+        super(clustered_comonotonic, self).__init__(x_train, y_train, unrankable, feature_val)
         # compute the correlation coefficient matrix by uncategorized data, include unrankable features
         self.uncategorized_df = uncategorized_df
         self.colnames = colnames
@@ -193,20 +200,19 @@ class clustered_comonotonic(pure_comonotonic):
         cluster_book = utils.cluster_agnes(distance_matrix, 1-self.min_corr)
         self.cluster_book = cluster_book # list of list
     
-    def run(self):
+    def run_cluster(self):
         self.get_prior_prob()
-        self.extract_feature_val()
         if self.unrankable != None:
             self.get_unrankable_prob()
         self.get_comonotonic_prob_interval()
         self.clustering()
     
-    def predict_single(self, x):
-        prob_distribution = self.get_prob_dist_single(x)
+    def predict_cluster_single(self, x):
+        prob_distribution = self.get_cluster_prob_dist_single(x)
         predicted_class = max(prob_distribution.items(), key=operator.itemgetter(1))[0]
         return predicted_class
     
-    def get_prob_dist_single(self, x):
+    def get_cluster_prob_dist_single(self, x):
         # get the probability distribution of one instance
         prob_distribution = self.prior_prob.copy() # initialize with prior probability
         if self.unrankable != None:
@@ -214,6 +220,7 @@ class clustered_comonotonic(pure_comonotonic):
                 for f in self.unrankable:
                     fv = x[f] # fv stands for feature value
                     prob_distribution[c] *= self.unrankable_post_prob[f][c][fv]
+        backup_prob_dist = prob_distribution.copy()
         for c in prob_distribution.keys():
             for cluster in self.cluster_book:
                 interval = []
@@ -222,11 +229,17 @@ class clustered_comonotonic(pure_comonotonic):
                     fv = x[f]
                     interval.append(self.como_prob_interval[f][c][fv])
                 prob_distribution[c] *= self.interval_intersection(interval)
-        prob_distribution_list = list(prob_distribution.values())
-        prob_distribution_list = [i*(10**8) for i in prob_distribution_list]
-        for k in prob_distribution.keys():
-            prob_distribution[k] = prob_distribution[k]*(10**8)/sum(prob_distribution_list) 
-        return prob_distribution
+        checker = all(value == 0 for value in prob_distribution.values())
+        if checker == True:
+            summation = sum(list(backup_prob_dist.values()))
+            for k in backup_prob_dist.keys():
+                backup_prob_dist[k] = backup_prob_dist[k]/summation 
+            return backup_prob_dist
+        else:        
+            summation = sum(list(prob_distribution.values()))
+            for k in prob_distribution.keys():
+                prob_distribution[k] = prob_distribution[k]/summation
+            return prob_distribution
         
 
 class naive_bayes:
@@ -255,7 +268,7 @@ class naive_bayes:
     def get_discrete_feature_val(self):
         discrete_feature_val = {}
         for i in self.discrete_feature:
-            discrete_feature_val[i] = max(np.unique(self.x_train.T[i]))+1
+            discrete_feature_val[i] = int(max(np.unique(self.x_train.T[i]))+1)
         self.discrete_feature_val = discrete_feature_val # how many categories for each feature
 
     def get_post_prob(self):
@@ -302,6 +315,7 @@ class naive_bayes:
     def predict_single(self, x):
         # deal with a single case
         prob_distribution = self.prior_prob.copy() # initialize with prior probability
+        scale_record = {k:0 for k in prob_distribution.keys()}
         for c in prob_distribution.keys():
             for f in self.discrete_feature:
                 fv = x[f] # fv stands for feature value
@@ -309,13 +323,26 @@ class naive_bayes:
         for c in prob_distribution.keys():
             for f in self.cont_feature:
                 fv = x[f]
-                prob_density = utils.gaussian_pdf(self.cont_mean_sd[f][c],fv)
+                mean = self.cont_mean_sd[f][c][0]
+                std = self.cont_mean_sd[f][c][1]
+                adjusted_fv = (fv - mean)/std
+                prob_density = norm.pdf(adjusted_fv)
+                if prob_density < 10**(-3):
+                    prob_density = 10**(-3)
                 prob_distribution[c] *= prob_density
-        predicted_class = max(prob_distribution.items(), key=operator.itemgetter(1))[0]
-        prob_distribution_list = list(prob_distribution.values())
-        prob_distribution_list = [i*(10**24) for i in prob_distribution_list]
-        for k in prob_distribution.keys():
-            prob_distribution[k] = prob_distribution[k]*(10**24)/sum(prob_distribution_list) 
+
+                if prob_distribution[c] < 0.1:
+                    scale, scaled_density = utils.scaler(prob_distribution[c])
+                    prob_distribution[c] = scaled_density
+                    scale_record[c] += scale
+        min_scale = min(scale_record.values())
+        scale_record = {k:scale_record[k]-min_scale for k in scale_record.keys()}
+        
+        adjusted_prob_distribution = {k:prob_distribution[k]*10**(-scale_record[k]) for k in prob_distribution.keys()}
+        predicted_class = max(adjusted_prob_distribution.items(), key=operator.itemgetter(1))[0]
+        summation = sum(list(adjusted_prob_distribution.values()))
+
+        adjusted_prob_distribution = {k:adjusted_prob_distribution[k]/summation for k in adjusted_prob_distribution.keys()}
         return predicted_class, prob_distribution
             
     def predict(self, x_test):
