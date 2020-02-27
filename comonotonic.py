@@ -5,24 +5,57 @@ import copy
 import operator
 import utils
 from sklearn.model_selection import train_test_split
-from scipy.stats import norm
 
 # handle the case of pure comonotonicity
 class pure_comonotonic:
-    def __init__(self, x_train, y_train, unrankable, feature_val):
+    
+    def __init__(self, x_train, y_train, discrete_feature_val, cont_col, unrankable, auto_discrete = True, allocation_book = None):
         """
         Features types: discrete rankable; discrete unrankable; continuous
         unrankable should be a list specifying the columns for discrete unrankable features
-        x_train should be categorized before passing in
+        x_train does not need to be categorized before passing in 
+        if auto_discrete is False, you should pass in allocation_book whose keys are cont columns and values are num of classes 
         """
         self.x_train = x_train # x_train is numpy 2d array
         self.y_train = y_train # y_train is numpy 1d array
+        self.cont_col = cont_col
         self.unrankable = unrankable # a list
+        self.auto_discrete = auto_discrete
+        self.allocation_book = allocation_book
         if self.unrankable != None: # get the indices of features used in comonotonicity
             self.como = list(set([i for i in range(len(x_train[0]))]) - set(unrankable))
         else:
             self.como = [i for i in range(len(x_train[0]))]
-        self.feature_val = feature_val
+        cont_feature_val = {}
+        for i in range(len(x_train.T)):
+            if i in cont_col:
+                if auto_discrete == True:
+                    cont_feature_val[i] = 8
+                else: # in this way, use the allocation_book to discretize
+                    cont_feature_val[i] = allocation_book[i]
+        if discrete_feature_val != None and len(discrete_feature_val) != 0:
+            self.feature_val = utils.merge_dict(cont_feature_val, discrete_feature_val)
+        else:
+            self.feature_val = cont_feature_val.copy()
+
+    def discretize(self):
+        x_transpose = self.x_train.T
+        discrete_x = []
+        bin_info = {k:None for k in self.cont_col}
+        for i, feature in enumerate(x_transpose):
+            if i in self.cont_col:
+                if self.auto_discrete == True:
+                    discretized, bins = utils.auto_discretize(feature)
+                    discrete_x.append(discretized)
+                    bin_info[i] = bins.copy()
+                else:
+                    discretized, bins = utils.custom_discretize(feature, self.allocation_book[i])
+                    discrete_x.append(discretized)
+                    bin_info[i] = bins.copy()
+            else:
+                discrete_x.append(feature)
+        self.x_train = np.array(discrete_x).T.astype(int)
+        self.bin_info = bin_info    
 
     def get_prior_prob(self):
         # get the prior probability and indices of instances for different classes
@@ -78,7 +111,7 @@ class pure_comonotonic:
         else:
             inf = 0
             sup = 0
-            for i in range(feature_value):
+            for i in range(int(feature_value)):
                 inf += class_dict[i]
             sup = inf + class_dict[feature_value]
             return [inf, sup]
@@ -112,6 +145,7 @@ class pure_comonotonic:
 
     def run(self):
         # this function generalizes the member functions above
+        self.discretize()
         self.get_prior_prob()
         #print("Complete prior probability")
         if self.unrankable != None:
@@ -172,181 +206,84 @@ class pure_comonotonic:
             y_predict.append(self.predict_single(x))
         return y_predict
 
+# please note that x_train and y_train should NOT be categorized
+# because they will be used for correlation coefficient matrix calculation
 class clustered_comonotonic(pure_comonotonic):
-    def __init__(self, x_train, y_train, unrankable, feature_val, uncategorized_df, colnames, min_corr, random_state):
-        super(clustered_comonotonic, self).__init__(x_train, y_train, unrankable, feature_val)
-        # compute the correlation coefficient matrix by uncategorized data, include unrankable features
-        self.uncategorized_df = uncategorized_df
-        self.colnames = colnames
+
+    def __init__(self, x_train, y_train, discrete_feature_val, cont_col, unrankable, 
+                 min_corr, auto_discrete = True, allocation_book = None):
+        super(clustered_comonotonic, self).__init__(x_train, y_train, discrete_feature_val, cont_col, unrankable, auto_discrete, allocation_book)
         self.min_corr = min_corr
-        self.random_state = random_state
-    
+
     def clustering(self):
-        # here we need to make sure that we compute the correlation coefficient matrix by the
-        # uncategorized X in the training set
-        uncategorized_x = self.uncategorized_df[self.colnames[:-1]].to_numpy()
-        uncategorized_y = self.uncategorized_df[self.colnames[-1]].to_numpy()
-        x_corr_train, x_corr_test, y_corr_train, y_corr_test = train_test_split(uncategorized_x,
-                                                                                uncategorized_y, test_size = 0.2, 
-                                                                                random_state = self.random_state)
-        del x_corr_test
-        del y_corr_train
-        del y_corr_test
-        rankable_var = np.array([[x_corr_train[row][col] for col in self.como] for row in range(len(x_corr_train))])
+        rankable_var = np.array([[self.x_train[row][col] for col in self.como] for row in range(len(self.x_train))])
         corr_matrix = np.corrcoef(rankable_var.T)
         abs_corr = np.absolute(corr_matrix)
         # need to do clustering by corr_matrix
         distance_matrix = 1 - abs_corr
+        # list of list, the indices in cluster book are the indices among RANKABLE features
         cluster_book = utils.cluster_agnes(distance_matrix, 1-self.min_corr)
-        self.cluster_book = cluster_book # list of list
-    
+        adjusted_cluster_book = []
+        for cluster in cluster_book:
+            adjusted_cluster = []
+            for idx in cluster:
+                adjusted_cluster.append(self.como[idx])
+            adjusted_cluster_book.append(adjusted_cluster)
+        self.cluster_book = adjusted_cluster_book
+
     def run_cluster(self):
         self.get_prior_prob()
         if self.unrankable != None:
             self.get_unrankable_prob()
-        self.get_comonotonic_prob_interval()
         self.clustering()
-    
+        self.discretize()
+        self.get_comonotonic_prob_interval()
+
     def predict_cluster_single(self, x):
         prob_distribution = self.get_cluster_prob_dist_single(x)
         predicted_class = max(prob_distribution.items(), key=operator.itemgetter(1))[0]
         return predicted_class
-    
+
     def get_cluster_prob_dist_single(self, x):
+        # change x to categorical
+        cate_x = []
+        for i, f in enumerate(x):
+            if i in self.cont_col:
+                cate_value = np.digitize(f,self.bin_info[i])
+                cate_x.append(cate_value)
+            else:
+                cate_x.append(f)
         # get the probability distribution of one instance
         prob_distribution = self.prior_prob.copy() # initialize with prior probability
         if self.unrankable != None:
             for c in prob_distribution.keys():
                 for f in self.unrankable:
-                    fv = x[f] # fv stands for feature value
+                    fv = cate_x[f] # fv stands for feature value
                     prob_distribution[c] *= self.unrankable_post_prob[f][c][fv]
         backup_prob_dist = prob_distribution.copy()
         for c in prob_distribution.keys():
             for cluster in self.cluster_book:
                 interval = []
                 for f_idx in cluster:
-                    f = self.como[f_idx]
-                    fv = x[f]
-                    interval.append(self.como_prob_interval[f][c][fv])
+                    fv = cate_x[f_idx]
+                    interval.append(self.como_prob_interval[f_idx][c][fv])
                 prob_distribution[c] *= self.interval_intersection(interval)
         checker = all(value == 0 for value in prob_distribution.values())
         if checker == True:
             summation = sum(list(backup_prob_dist.values()))
+            final_distribution = {}
             for k in backup_prob_dist.keys():
-                backup_prob_dist[k] = backup_prob_dist[k]/summation 
-            return backup_prob_dist
+                final_distribution[k] = backup_prob_dist[k]/summation 
+            return final_distribution
         else:        
             summation = sum(list(prob_distribution.values()))
+            final_distribution = {}
             for k in prob_distribution.keys():
-                prob_distribution[k] = prob_distribution[k]/summation
-            return prob_distribution
-        
-
-class naive_bayes:
-    # note that the x_train here SHOULD NOT BE CATEGORIZED, pass in after encoding
-    # cont_feature is a list containing indices of continuous features
-    def __init__(self, x_train, y_train, cont_feature):
-        self.x_train = x_train
-        self.y_train = y_train
-        self.cont_feature = cont_feature
-        self.discrete_feature = list(set([i for i in range(len(x_train[0]))]) - set(cont_feature))
+                final_distribution[k] = prob_distribution[k]/summation
+            return final_distribution
     
-    def get_prior_prob(self):
-        # get the prior probability and indices of instances for different classes
-        prior_prob = {} # key is class, value is the prior probability of this class
-        class_idx = {} # key is class, value is a list containing the indices of instances for this class
-        for i in range(len(self.y_train)):
-            if self.y_train[i] not in class_idx.keys():
-                class_idx[self.y_train[i]] = [i]
-            else:
-                class_idx[self.y_train[i]].append(i)
-        prior_prob = {k:len(v)/len(self.y_train) for k,v in class_idx.items()}
-        self.prior_prob = prior_prob
-        self.class_idx = class_idx
-
-    # extract the discrete feature value
-    def get_discrete_feature_val(self):
-        discrete_feature_val = {}
-        for i in self.discrete_feature:
-            discrete_feature_val[i] = int(max(np.unique(self.x_train.T[i]))+1)
-        self.discrete_feature_val = discrete_feature_val # how many categories for each feature
-
-    def get_post_prob(self):
-        discrete_post_prob = {} # { feature: {class: {fv: post_prob } } }
-        for f in self.discrete_feature:
-            feature_dict = {}
-            for c in self.class_idx.keys():
-                class_dict = {}
-                for idx in self.class_idx[c]: # traverse the instances of this class
-                    if self.x_train[idx][f] not in class_dict.keys():
-                        class_dict[self.x_train[idx][f]] = 1
-                    else:
-                        class_dict[self.x_train[idx][f]] += 1
-                # use Laplacian correction to avoid zero probability problem
-                all_fv = [i for i in range(self.discrete_feature_val[f])]
-                for fv in all_fv:
-                    if fv not in class_dict.keys():
-                        class_dict[fv] = 1
-                summation = sum(class_dict.values())
-                class_dict = {k:v/summation for k,v in class_dict.items()}
-                feature_dict[c] = class_dict
-            discrete_post_prob[f] = feature_dict
-        # guassian distribution for continuous features
-        # we store the mean and standard deviation for each feature within each class
-        cont_mean_sd = {} # { feature: {class: (mean, sd)} }
-        for f in self.cont_feature:
-            feature_dict = {}
-            for c in self.class_idx.keys():
-                values = []
-                for idx in self.class_idx[c]:
-                    values.append(self.x_train[idx][f])
-                mean = np.mean(np.array(values))
-                sd = np.std(np.array(values))
-                feature_dict[c] = (mean, sd)
-            cont_mean_sd[f] = feature_dict
-        self.discrete_post_prob = discrete_post_prob
-        self.cont_mean_sd = cont_mean_sd
-
-    def run(self):
-        self.get_prior_prob()
-        self.get_discrete_feature_val()
-        self.get_post_prob()
-
-    def predict_single(self, x):
-        # deal with a single case
-        prob_distribution = self.prior_prob.copy() # initialize with prior probability
-        scale_record = {k:0 for k in prob_distribution.keys()}
-        for c in prob_distribution.keys():
-            for f in self.discrete_feature:
-                fv = x[f] # fv stands for feature value
-                prob_distribution[c] *= self.discrete_post_prob[f][c][fv]
-        for c in prob_distribution.keys():
-            for f in self.cont_feature:
-                fv = x[f]
-                mean = self.cont_mean_sd[f][c][0]
-                std = self.cont_mean_sd[f][c][1]
-                adjusted_fv = (fv - mean)/std
-                prob_density = norm.pdf(adjusted_fv)
-                if prob_density < 10**(-3):
-                    prob_density = 10**(-3)
-                prob_distribution[c] *= prob_density
-
-                if prob_distribution[c] < 0.1:
-                    scale, scaled_density = utils.scaler(prob_distribution[c])
-                    prob_distribution[c] = scaled_density
-                    scale_record[c] += scale
-        min_scale = min(scale_record.values())
-        scale_record = {k:scale_record[k]-min_scale for k in scale_record.keys()}
-        
-        adjusted_prob_distribution = {k:prob_distribution[k]*10**(-scale_record[k]) for k in prob_distribution.keys()}
-        predicted_class = max(adjusted_prob_distribution.items(), key=operator.itemgetter(1))[0]
-        summation = sum(list(adjusted_prob_distribution.values()))
-
-        adjusted_prob_distribution = {k:adjusted_prob_distribution[k]/summation for k in adjusted_prob_distribution.keys()}
-        return predicted_class, prob_distribution
-            
-    def predict(self, x_test):
+    def cluster_predict(self, x_test):
         y_predict = []
         for x in x_test:
-            y_predict.append(self.predict_single(x)[0])
+            y_predict.append(self.predict_cluster_single(x))
         return y_predict
