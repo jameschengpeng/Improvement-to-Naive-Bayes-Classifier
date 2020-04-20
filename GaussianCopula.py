@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
-from sklearn.neighbors import KernelDensity
-from sklearn.model_selection import GridSearchCV, LeaveOneOut, RandomizedSearchCV
+from scipy import stats
 import copy
 import collections
 import utils
@@ -41,8 +40,6 @@ class CopulaClassifier:
             print("Got discrete posterior")
         self.clustering()
         print("Finished clustering")
-        self.optimize_bandwidth(custom_bandwidth)
-        print("Optimized bandwidth")
     
     """
     get the probability distribution of the test set
@@ -51,7 +48,7 @@ class CopulaClassifier:
         test_result = self.copula_density(x_test)
         prob_distribution = {i:{c: np.exp(test_result[i][c]) for c in test_result[i].keys()} for i in test_result.keys()}
         return prob_distribution
-    
+
     """
     make a prediction for the test set
     """
@@ -59,7 +56,7 @@ class CopulaClassifier:
         prob_distribution = self.test_prob_dist(x_test)
         prediction = {i: max(prob_distribution[i].items(), key=operator.itemgetter(1))[0] for i in prob_distribution.keys()}
         return prediction
-    
+
     """
     compute by copula
     return {index of test data: {class: prob_density}}
@@ -102,10 +99,8 @@ class CopulaClassifier:
             x = self.divided_train_set[i]
             for f in self.rankable:
                 x_i = x.T[f]
-                bw = self.opt_bandwidths[c][f]
-                kde = KernelDensity(bandwidth=bw, kernel="gaussian")
-                kde.fit(x_i[:, None])
-                class_dict[f] = kde.score_samples(x_test.T[f][:, None])
+                kde = stats.gaussian_kde(x_i)
+                class_dict[f] = kde(x_test.T[f])
             testset_rankable_density[c] = class_dict
         testset_rankable_density = testset_rankable_density
         return testset_rankable_density
@@ -172,30 +167,3 @@ class CopulaClassifier:
                 adjusted_cluster.append(self.rankable[idx])
             adjusted_cluster_book.append(adjusted_cluster)
         self.cluster_book = adjusted_cluster_book
-        
-    """
-    to find the best bandwidth, return a dictionary {class: {feature: bandwidth}}
-    """
-    def optimize_bandwidth(self, custom_bandwidth):
-        if self.use_custom_bandwidth == True:
-            self.opt_bandwidths = custom_bandwidth
-        else:
-            bandwidths = 10 ** np.linspace(-1, 2, 10)
-            opt_bandwidths = {}
-            if self.use_default_bandwidth == False:
-                for i, c in enumerate(self.classes):
-                    class_book = {}
-                    for f in self.rankable:
-                        print("Start to find opt bandwidth for class, feature" + str(c) + "," + str(f))
-                        x = self.divided_train_set[i].T[f]
-                        grid = RandomizedSearchCV(KernelDensity(kernel='gaussian'),
-                                            {'bandwidth': bandwidths},
-                                            cv=len(x))
-                        grid.fit(x[:, None])
-                        class_book[f] = grid.best_params_['bandwidth']
-                        print("Found opt bandwidth for class, feature" + str(c) + "," + str(f))
-                    opt_bandwidths[c] = class_book
-            else:
-                opt_bandwidths = {c:{f:1.0 for f in self.rankable} for c in self.classes}
-            self.opt_bandwidths = opt_bandwidths
-        return self

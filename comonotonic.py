@@ -33,7 +33,7 @@ class pure_comonotonic:
                     cont_feature_val[i] = 8
                 else: # in this way, use the allocation_book to discretize
                     cont_feature_val[i] = allocation_book[i]
-        if discrete_feature_val != None and len(discrete_feature_val) != 0:
+        if discrete_feature_val != None:
             self.feature_val = utils.merge_dict(cont_feature_val, discrete_feature_val)
         else:
             self.feature_val = cont_feature_val.copy()
@@ -171,34 +171,38 @@ class pure_comonotonic:
         return predicted_class
     
     def get_prob_dist_single(self, x):
+        cate_x = []
+        for i,f in enumerate(x):
+            if i in self.cont_col:
+                cate_x.append(np.digitize(f,self.bin_info[i]))
+            else:
+                cate_x.append(f)
         # get the probability distribution of one instance
         prob_distribution = self.prior_prob.copy() # initialize with prior probability
         if self.unrankable != None:
             for c in prob_distribution.keys():
                 for f in self.unrankable:
-                    fv = x[f] # fv stands for feature value
+                    fv = cate_x[f] # fv stands for feature value
                     prob_distribution[c] *= self.unrankable_post_prob[f][c][fv]
+        backup_prob_dist = prob_distribution.copy()
         for c in prob_distribution.keys():
             intervals = []
             for f in self.como:
-                fv = x[f]
+                fv = cate_x[f]
                 intervals.append(self.como_prob_interval[f][c][fv])
             prob_distribution[c] *= self.interval_intersection(intervals)
-        prob_distribution_list = list(prob_distribution.values())
-        checker = [(i > 0) for i in prob_distribution_list]
-        if any(checker): # exists non-empty intersection
+        checker = all(value == 0 for value in prob_distribution.values())
+        if checker == True:
+            summation = sum(list(backup_prob_dist.values()))
+            final_distribution = {}
+            for k in backup_prob_dist.keys():
+                final_distribution[k] = backup_prob_dist[k]/summation 
+        else:        
+            summation = sum(list(prob_distribution.values()))
+            final_distribution = {}
             for k in prob_distribution.keys():
-                if prob_distribution[k] < 0:
-                    prob_distribution[k] = 0 
-            prob_distribution_list = list(map(lambda x: max(x,0), prob_distribution_list))
-        else: # the case in which empty intersection for each class
-            minimum = min(prob_distribution_list)
-            for k in prob_distribution.keys():
-                prob_distribution[k] = prob_distribution[k] - minimum
-            prob_distribution_list = list(map(lambda x: (x - 2*minimum), prob_distribution_list))
-        for k in prob_distribution.keys():
-            prob_distribution[k] = prob_distribution[k]/sum(prob_distribution_list)
-        return prob_distribution
+                final_distribution[k] = prob_distribution[k]/summation
+        return final_distribution
             
     def predict(self, x_test):
         y_predict = []

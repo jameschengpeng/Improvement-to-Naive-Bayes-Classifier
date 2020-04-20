@@ -4,6 +4,7 @@ import copy
 import comonotonic as cm
 from sklearn.model_selection import train_test_split
 from sklearn import preprocessing
+from sklearn.metrics import confusion_matrix
 import random
 import math
 import operator
@@ -44,8 +45,8 @@ def normalize_df_col(df, cont_columns):
 
 # split the dataframe, discretize the training set and get the bins, discretize the test set based on the bins
 def df_split_discretize(df, random_state, qcut, allocation_book):
-    X = df.iloc[:,0:-1]
-    Y = df.iloc[:,-1]
+    X = df.iloc[:,0:-1].copy()
+    Y = df.iloc[:,-1].copy()
     for col_idx in allocation_book.keys():
         if qcut == False:    
             discretized_col = pd.cut(X.iloc[:,col_idx],allocation_book[col_idx], labels=[i for i in range(allocation_book[col_idx])])
@@ -59,7 +60,14 @@ def df_split_discretize(df, random_state, qcut, allocation_book):
             discretized_col = discretized_col.astype('int32')
         X['X'+str(col_idx)] = discretized_col
     X_train_df, X_test_df, Y_train_df, Y_test_df = train_test_split(X,Y,test_size=0.2,random_state=random_state)
-    return X_train_df, X_test_df, Y_train_df, Y_test_df
+    return X_train_df.to_numpy(), X_test_df.to_numpy(), Y_train_df.to_numpy(), Y_test_df.to_numpy()
+
+# use clustered comonotonic method
+def check_accuracy(x_train,x_test,y_train,y_test,discrete_feature_val,cont_col,unrankable):
+    clf_c_como = cm.clustered_comonotonic(x_train,y_train,discrete_feature_val,cont_col,unrankable,0.9)
+    clf_c_como.run_cluster()
+    c_como_predict = clf_c_como.cluster_predict(x_test)
+    return classwise_accuracy(y_test,c_como_predict), get_accuracy(c_como_predict,y_test)
 
 def merge_dict(d1, d2):
     d = {}
@@ -167,3 +175,10 @@ def copula_func(u, R):
     b = np.matmul(vec, mid_mat)
     c = np.matmul(b, vec.T)
     return a * np.exp(-0.5 * c)
+
+def classwise_accuracy(y_true, y_pred):
+    confusion_mat = confusion_matrix(y_true, y_pred)
+    class_acc = {}
+    for i in range(len(confusion_mat)):
+        class_acc[i] = confusion_mat[i][i]/sum(confusion_mat[i])
+    return class_acc
